@@ -9,16 +9,23 @@ export function compareDeep<T>(objA: T, objB: T): boolean {
 type PairSet = WeakMap<object, WeakSet<object>>
 
 interface Seen {
-  // pairs still being compared further up the stack
-  inProgress: PairSet
-  // pairs proven equal without assuming an in-progress pair
+  // stack depth of each pair still being compared further up the stack
+  inProgress: WeakMap<object, Map<object, number>>
+  // pairs proven equal
   equal: PairSet
-  // how many times an in-progress pair was assumed equal
-  assumptions: number
+  // depth of the pair being compared
+  depth: number
+  // shallowest in-progress pair assumed equal below the current one
+  lowestAssumed: number
 }
 
 function createSeen(): Seen {
-  return { inProgress: new WeakMap(), equal: new WeakMap(), assumptions: 0 }
+  return {
+    inProgress: new WeakMap(),
+    equal: new WeakMap(),
+    depth: 0,
+    lowestAssumed: Infinity,
+  }
 }
 
 function hasPair(pairs: PairSet, a: object, b: object): boolean {
@@ -60,25 +67,41 @@ function _evaluate<T>(
   if (hasPair(seen.equal, objA, objB)) return true
 
   // guards against circular references: a pair that is still being compared
-  // further up the stack is assumed equal. A result that relied on such an
-  // assumption is not cached, so a failed comparison (e.g. while matching Set
-  // elements) is never remembered as a success.
-  if (hasPair(seen.inProgress, objA, objB)) {
-    seen.assumptions++
+  // further up the stack is assumed equal. A pair is cached as equal only if
+  // every pair it assumed was itself or one below it, all now complete, so a
+  // failed comparison (e.g. while matching Set elements) is never remembered
+  // as a success.
+  const assumedDepth = seen.inProgress.get(objA)?.get(objB)
+  if (assumedDepth !== undefined) {
+    seen.lowestAssumed = Math.min(seen.lowestAssumed, assumedDepth)
     return true
   }
 
-  addPair(seen.inProgress, objA, objB)
-  const assumptions = seen.assumptions
+  let pairs = seen.inProgress.get(objA)
+  if (!pairs) {
+    pairs = new Map()
+    seen.inProgress.set(objA, pairs)
+  }
+  const depth = ++seen.depth
+  pairs.set(objB, depth)
+  const outerLowestAssumed = seen.lowestAssumed
+  seen.lowestAssumed = Infinity
 
   try {
     const result = _evaluateObjects(objA, objB, config, seen)
-    if (result && seen.assumptions === assumptions) {
+    if (result && seen.lowestAssumed >= depth) {
       addPair(seen.equal, objA, objB)
     }
     return result
   } finally {
-    seen.inProgress.get(objA)?.delete(objB)
+    pairs.delete(objB)
+    seen.depth--
+    // assumptions about pairs above this one still apply to them
+    const innerLowestAssumed = seen.lowestAssumed
+    seen.lowestAssumed = Math.min(
+      outerLowestAssumed,
+      innerLowestAssumed < depth ? innerLowestAssumed : Infinity,
+    )
   }
 }
 
@@ -139,6 +162,7 @@ function _evaluateObjects<T>(
       // cannot hide a valid matching. Pairs are compared lazily, once.
       const values = [...objA]
       const others = [...objB]
+      const indexOfOther = new Map(others.map((other, index) => [other, index]))
       const owner: Array<number> = others.map(() => -1)
       const compared = new Map<number, boolean>()
       const matches = (value: number, index: number): boolean => {
@@ -165,8 +189,8 @@ function _evaluateObjects<T>(
         return false
       }
       for (let value = 0; value < values.length; value++) {
-        const same = others.indexOf(values[value])
-        if (same !== -1 && owner[same] === -1) {
+        const same = indexOfOther.get(values[value])
+        if (same !== undefined && owner[same] === -1) {
           owner[same] = value
           continue
         }

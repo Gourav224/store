@@ -441,6 +441,19 @@ describe('evaluate', () => {
       ).toEqual(true)
     })
 
+    it('should compare a shared self-referencing child only once', () => {
+      const build = () => {
+        const leaf: Record<string, unknown> = {}
+        leaf.self = leaf
+        let node: object = leaf
+        for (let i = 0; i < 30; i++) node = { left: node, right: node }
+        return node
+      }
+
+      // 2^30 comparisons if a pair that assumed only itself is not cached
+      expect(compareDeep(build(), build())).toEqual(true)
+    })
+
     it('should find a Set matching that needs an earlier match to move', () => {
       // `equals` that is not transitive: a1 equals b1 and b2, a2 only b1
       class Item {
